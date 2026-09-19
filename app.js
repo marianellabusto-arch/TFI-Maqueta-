@@ -2988,7 +2988,7 @@ function editForm(collection, id = '', preset = {}) {
         'DNI',
         item.dni,
         'text',
-        'required pattern="[0-9]{7,9}"'
+        'required pattern="[0-9]{8}" minlength="8" maxlength="8" inputmode="numeric" title="El DNI debe tener 8 números" oninput="this.value=this.value.replace(/[^0-9]/g,\'\').slice(0,8)"'
       ) +
       field('phone', 'Teléfono', item.phone, 'tel', 'required') +
       field('email', 'Correo', item.email, 'email', 'required') +
@@ -3537,13 +3537,18 @@ async function saveEntity(form) {
     data.qr = old?.qr || uid();
   }
 
-  if (
-    collection === 'owners' &&
-    db.owners.some(owner =>
-      owner.dni === data.dni && owner.id !== id
-    )
-  ) {
-    return fail('Ya existe un propietario con ese DNI.');
+  if (collection === 'owners') {
+    if (!/^[0-9]{8}$/.test(data.dni || '')) {
+      return fail('El DNI debe tener exactamente 8 números.');
+    }
+
+    if (
+      db.owners.some(owner =>
+        owner.dni === data.dni && owner.id !== id
+      )
+    ) {
+      return fail('Ya existe un propietario con ese DNI.');
+    }
   }
 
   if (collection === 'vets') {
@@ -4037,6 +4042,14 @@ async function submitForm(form) {
         active: true
       };
 
+      if (typeof owner.dni === 'string') {
+        owner.dni = owner.dni.trim();
+      }
+
+      if (!/^[0-9]{8}$/.test(owner.dni || '')) {
+        return fail('El DNI debe tener exactamente 8 números.');
+      }
+
       if (db.owners.some(item => item.dni === owner.dni)) {
         return fail('Ya existe un propietario con ese DNI.');
       }
@@ -4208,7 +4221,7 @@ async function action(actionName, id, element) {
             'DNI',
             '',
             'text',
-            'required pattern="[0-9]{7,9}"'
+            'required pattern="[0-9]{8}" minlength="8" maxlength="8" inputmode="numeric" title="El DNI debe tener 8 números" oninput="this.value=this.value.replace(/[^0-9]/g,\'\').slice(0,8)"'
           ) +
           field('phone', 'Teléfono', '', 'tel', 'required') +
           field('email', 'Correo', '', 'email', 'required') +
