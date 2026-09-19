@@ -65,6 +65,48 @@ const DEMO_ACCOUNTS = [
 
 const KEY = 'veterinaria-prototipo-v1';
 const CODE = '123456';
+const THEME_KEY = KEY + '-theme';
+
+function currentTheme() {
+  try {
+    return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light';
+  } catch {
+    return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+  }
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch {
+    // Sin almacenamiento: se mantiene solo en la sesión.
+  }
+
+  const fab = document.querySelector('.theme-fab');
+
+  if (fab) {
+    fab.textContent = theme === 'dark' ? '☀️ Claro' : '🌙 Oscuro';
+  }
+}
+
+function toggleTheme() {
+  applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+}
+
+function ensureThemeFab() {
+  if (!document.querySelector('.theme-fab')) {
+    const fab = document.createElement('button');
+
+    fab.type = 'button';
+    fab.className = 'theme-fab';
+    fab.dataset.action = 'theme';
+    document.body.appendChild(fab);
+  }
+
+  applyTheme(currentTheme());
+}
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -4142,6 +4184,10 @@ async function action(actionName, id, element) {
       $('.sidebar').classList.toggle('open');
       break;
 
+    case 'theme':
+      toggleTheme();
+      break;
+
     case 'account': {
       if ($('.account-menu')) {
         return $('.account-menu').remove();
@@ -4725,6 +4771,7 @@ window.addEventListener('storage', event => {
 
 // INICIO DE LA APLICACIÓN
 
+ensureThemeFab();
 load();
 
 if (db.configured) {
