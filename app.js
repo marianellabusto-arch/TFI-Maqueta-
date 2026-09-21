@@ -1005,7 +1005,6 @@ function login() {
 
     <p class="center">
       ${button('¿Olvidaste tu contraseña?', 'recover', '', 'ghost')}
-      ${button('¿No tenés cuenta? Crear cuenta', 'register', '', 'ghost')}
     </p>
 
     <div class="demo">
@@ -1026,44 +1025,7 @@ function login() {
         Los accesos son simulados y los datos se guardan en este navegador.
         Utilizá información ficticia.
       </small>
-
-      <div>
-        ${button('Reiniciar maqueta (pedir registro inicial)', 'reset-demo', '', 'ghost small')}
-      </div>
     </div>
-  `);
-}
-
-function registerScreen() {
-  recovery = null;
-
-  authShell(`
-    <div class="eyebrow">
-      Crear cuenta en ${esc(db.config?.name || 'tu veterinaria')}
-    </div>
-
-    <h1>Registrate</h1>
-    <p>Creá tu cuenta de propietario para gestionar tus mascotas y turnos.</p>
-
-    <form data-form="register">
-      ${field('name', 'Nombre y apellido', '', 'text', 'required autocomplete="name"')}
-      ${field('dni', 'DNI (8 números)', '', 'text', 'required pattern="[0-9]{8}" minlength="8" maxlength="8" inputmode="numeric" title="El DNI debe tener exactamente 8 números."')}
-      ${field('address', 'Dirección', '', 'text', 'required autocomplete="street-address"')}
-      ${field('phone', 'Número de teléfono', '', 'tel', 'required autocomplete="tel"')}
-      ${field('email', 'Gmail / correo electrónico', '', 'email', 'required autocomplete="email"')}
-      ${field('password', 'Contraseña (mínimo 6 caracteres)', '', 'password', 'minlength="6" required autocomplete="new-password"')}
-      ${field('confirm', 'Confirmar contraseña', '', 'password', 'minlength="6" required autocomplete="new-password"')}
-
-      <div id="form-error" class="error" role="alert"></div>
-
-      <button class="primary full" type="submit">
-        Crear cuenta →
-      </button>
-    </form>
-
-    <p class="center">
-      ${button('¿Ya tenés cuenta? Iniciar sesión', 'login', '', 'ghost')}
-    </p>
   `);
 }
 
@@ -3065,14 +3027,10 @@ function editForm(collection, id = '', preset = {}) {
       field('name', 'Nombre y apellido', item.name, 'text', 'required') +
       field(
         'dni',
-        'DNI (8 números)',
+        'DNI',
         item.dni,
         'text',
-<<<<<<< HEAD
-        'required pattern="[0-9]{8}" minlength="8" maxlength="8" inputmode="numeric" title="El DNI debe tener exactamente 8 números."'
-=======
         'required pattern="[0-9]{8}" minlength="8" maxlength="8" inputmode="numeric" title="El DNI debe tener 8 números" oninput="this.value=this.value.replace(/[^0-9]/g,\'\').slice(0,8)"'
->>>>>>> 7cf1f9066cfde017f8d6c7334e4e328b0e40569b
       ) +
       field('phone', 'Teléfono', item.phone, 'tel', 'required') +
       field('email', 'Correo', item.email, 'email', 'required') +
@@ -3916,70 +3874,6 @@ async function submitForm(form) {
       break;
     }
 
-    case 'register': {
-      const name = (data.name || '').trim();
-      const dni = (data.dni || '').trim();
-      const address = (data.address || '').trim();
-      const phone = (data.phone || '').trim();
-      const email = (data.email || '').trim();
-
-      if (!name || !dni || !address || !phone || !email) {
-        return fail('Completá todos los datos solicitados.');
-      }
-
-      if (!/^[0-9]{8}$/.test(dni)) {
-        return fail('El DNI debe tener exactamente 8 números.');
-      }
-
-      if ((data.password || '').length < 6) {
-        return fail('La contraseña debe tener al menos 6 caracteres.');
-      }
-
-      if (data.password !== data.confirm) {
-        return fail('Las contraseñas no coinciden.');
-      }
-
-      if (db.owners.some(owner => owner.dni === dni)) {
-        return fail('Ya existe un propietario con ese DNI.');
-      }
-
-      if (db.users.some(account =>
-        account.email.toLowerCase() === email.toLowerCase()
-      )) {
-        return fail('Ese correo ya tiene una cuenta.');
-      }
-
-      const ownerId = uid();
-
-      const ok = commit(() => {
-        db.owners.push({
-          id: ownerId,
-          name,
-          dni,
-          phone,
-          email,
-          address,
-          active: true
-        });
-
-        db.users.push({
-          id: uid(),
-          name,
-          email,
-          password: data.password,
-          role: 'owner',
-          ownerId,
-          active: true
-        });
-      });
-
-      if (ok) {
-        login();
-        toast('Cuenta creada correctamente. Ahora iniciá sesión.');
-      }
-      break;
-    }
-
     case 'recover':
       if (!recovery) {
         const account = db.users.find(item =>
@@ -4184,10 +4078,6 @@ async function submitForm(form) {
     case 'inline-owner': {
       if (!mayEdit('owners')) return;
 
-      if (!/^[0-9]{8}$/.test(data.dni?.trim() || '')) {
-        return fail('El DNI debe tener exactamente 8 números.');
-      }
-
       const owner = {
         ...data,
         id: uid(),
@@ -4248,26 +4138,6 @@ async function action(actionName, id, element) {
 
     case 'login':
       login();
-      break;
-
-    case 'reset-demo':
-      try {
-        localStorage.removeItem(KEY);
-        localStorage.removeItem(KEY + '-email');
-      } catch {
-        // Si el navegador bloquea el almacenamiento, igual reiniciamos en memoria.
-      }
-      db = { configured: false };
-      user = null;
-      draft = {};
-      authStep = 0;
-      recovery = null;
-      close();
-      setup();
-      break;
-
-    case 'register':
-      registerScreen();
       break;
 
     case 'recover':
@@ -4394,14 +4264,10 @@ async function action(actionName, id, element) {
           field('name', 'Nombre y apellido', '', 'text', 'required') +
           field(
             'dni',
-            'DNI (8 números)',
+            'DNI',
             '',
             'text',
-<<<<<<< HEAD
-            'required pattern="[0-9]{8}" minlength="8" maxlength="8" inputmode="numeric" title="El DNI debe tener exactamente 8 números."'
-=======
             'required pattern="[0-9]{8}" minlength="8" maxlength="8" inputmode="numeric" title="El DNI debe tener 8 números" oninput="this.value=this.value.replace(/[^0-9]/g,\'\').slice(0,8)"'
->>>>>>> 7cf1f9066cfde017f8d6c7334e4e328b0e40569b
           ) +
           field('phone', 'Teléfono', '', 'tel', 'required') +
           field('email', 'Correo', '', 'email', 'required') +
@@ -4907,22 +4773,6 @@ window.addEventListener('storage', event => {
 
 ensureThemeFab();
 load();
-
-const forceSetup = ['maqueta', 'demo', 'setup', 'nuevo'].some(key =>
-  new URLSearchParams(location.search).has(key)
-);
-
-if (forceSetup) {
-  try {
-    localStorage.removeItem(KEY);
-  } catch {
-    // Sin almacenamiento, igual mostramos el registro inicial.
-  }
-  db = { configured: false };
-  draft = {};
-  authStep = 0;
-  user = null;
-}
 
 if (db.configured) {
   login();
