@@ -4,7 +4,7 @@
   Sistema de Gestión Veterinaria.
   Prototipo local con HTML, CSS y JavaScript.
   Las cuentas, códigos y permisos son simulados.
-  Abrir index.html junto a styles.css y script.js.
+  Abrir index.html junto a styles.css y app.js.
 */
 
 const DEMO_ACCOUNTS = [
@@ -180,9 +180,11 @@ const navs = {
   owners: ['Propietarios', 'users'],
   vets: ['Veterinarios', 'medical'],
   agenda: ['Agenda', 'calendar'],
+  income: ['Ingresos', 'receipt'],
   schedules: ['Horarios', 'clock'],
   services: ['Servicios', 'medical'],
   products: ['Catálogo', 'bag'],
+  tickets: ['Mis tickets', 'receipt'],
   notices: ['Avisos', 'megaphone'],
   notifications: ['Notificaciones', 'bell'],
   reminders: ['Recordatorios', 'clock'],
@@ -197,6 +199,7 @@ const allowed = {
     'pets',
     'owners',
     'agenda',
+    'tickets',
     'services',
     'notifications',
     'reminders'
@@ -227,6 +230,11 @@ let draft = {};
 let authStep = 0;
 let recovery = null;
 let toastTimer;
+let billingPeriod = 'month';
+let billingFrom = today();
+let billingTo = today();
+let incomeDay = '';
+let ticketItemCount = 0;
 
 const paths = {
   home: 'M3 10 12 3l9 7v11h-6v-7H9v7H3z',
@@ -243,7 +251,8 @@ const paths = {
   plus: 'M12 4v16M4 12h16',
   search: 'M10 17a7 7 0 1 0 0-14 7 7 0 0 0 0 14M15 15l6 6',
   qr: 'M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3zM15 15h3v3h3v3h-6z',
-  menu: 'M3 6h18M3 12h18M3 18h18'
+  menu: 'M3 6h18M3 12h18M3 18h18',
+  receipt: 'M5 3h14v18l-2.5-1.5L14 21l-2-1.2L10 21l-2.5-1.5zM8.5 8h7M8.5 12h7'
 };
 
 // COMPONENTES Y UTILIDADES
@@ -372,6 +381,20 @@ function load() {
     db = JSON.parse(localStorage.getItem(KEY)) || { configured: false };
   } catch {
     db = { configured: false };
+  }
+
+  if (db.configured) {
+    db.tickets ||= [];
+    db.config ||= {};
+    db.config.ticketSeq ||= 0;
+
+    if (Array.isArray(db.services)) {
+      db.services.forEach(service => {
+        if (typeof service.price !== 'number' || Number.isNaN(service.price)) {
+          service.price = 0;
+        }
+      });
+    }
   }
 }
 
@@ -525,6 +548,7 @@ function seed(config, admin) {
     name,
     duration: 30,
     description: 'Atención con turno previo.',
+    price: [15000, 28000, 12000, 9000, 8000][index],
     active: true
   }));
 
@@ -613,6 +637,12 @@ function seed(config, admin) {
     });
   }
 
+  appointments.push(...demoPastAppointments());
+
+  const demoTickets = buildDemoTickets();
+
+  config.ticketSeq = demoTickets.length;
+
   return {
     configured: true,
     config,
@@ -638,6 +668,7 @@ function seed(config, admin) {
     services,
     schedules,
     appointments,
+    tickets: demoTickets,
 
     clinical: pets.map(pet => ({
       id: uid(),
@@ -656,7 +687,7 @@ function seed(config, admin) {
 
     products: [
       {
-        id: uid(),
+        id: 'pr1',
         name: 'Alimento adulto balanceado',
         category: 'Nutrición',
         description: 'Bolsa de 3 kg. Consultá la variedad indicada para tu mascota.',
@@ -666,7 +697,7 @@ function seed(config, admin) {
         photo: ''
       },
       {
-        id: uid(),
+        id: 'pr2',
         name: 'Pipeta para perros',
         category: 'Cuidado',
         description: 'Presentación según peso. Consultá al profesional.',
@@ -676,7 +707,7 @@ function seed(config, admin) {
         photo: ''
       },
       {
-        id: uid(),
+        id: 'pr3',
         name: 'Transportadora mediana',
         category: 'Accesorios',
         description: 'Base rígida y ventilación lateral.',
@@ -1144,6 +1175,14 @@ function shell() {
 
       <div class="eyebrow">Tu espacio de trabajo</div>
 
+      ${['admin', 'vet'].includes(user.role)
+        ? `
+          <div class="side-ticket">
+            ${button(icon('receipt') + ' Generar ticket', 'ticket-create', '', 'primary')}
+          </div>
+        `
+        : ''}
+
       <nav>
         ${allowed[user.role]
           .filter(key => navs[key])
@@ -1241,6 +1280,7 @@ function navigate(nextRoute, id) {
   query = '';
   filter = '';
   page = 1;
+  incomeDay = '';
 
   if (nextRoute === 'pet') {
     selectedPet = id;
@@ -1273,9 +1313,13 @@ function badge(status) {
     ? 'pending'
     : status === 'Cancelado'
       ? 'cancel'
-      : status === 'Atendido'
-        ? 'blue'
-        : '';
+      : status === 'Anulado'
+        ? 'void'
+        : status === 'Atendido'
+          ? 'blue'
+          : status === 'Pagado'
+            ? 'paid'
+            : '';
 
   return `<span class="badge ${className}">${esc(status)}</span>`;
 }
@@ -1372,12 +1416,31 @@ function home() {
       db.owners.filter(owner => owner.active).length,
       'users',
       'Familias que nos acompañan'
-    ]
+    ],
+    ...(user.role === 'admin'
+      ? [[
+        'Ingresos de hoy',
+        money(
+          (db.tickets || [])
+            .filter(ticket =>
+              ticket.status === 'Pagado' && ticket.date === today()
+            )
+            .reduce((sum, ticket) => sum + Number(ticket.total || 0), 0)
+        ),
+        'receipt',
+        'Cobros del día',
+        'income'
+      ]]
+      : [])
   ];
 
   const quickActions = [
     ['Nueva mascota', 'create', 'pets', 'pet'],
     ['Nuevo turno', 'book', '', 'calendar'],
+
+    ...(['admin', 'vet'].includes(user.role)
+      ? [['Nuevo ticket', 'ticket-create', '', 'receipt']]
+      : []),
 
     ...(user.role === 'admin'
       ? [['Nuevo veterinario', 'create', 'vets', 'medical']]
@@ -1413,12 +1476,13 @@ function home() {
     <div id="global-results" class="search-results"></div>
 
     <section class="stats">
-      ${stats.map(([title, amount, iconName, subtitle]) => `
+      ${stats.map(([title, amount, iconName, subtitle, navRoute]) => `
         <article class="card stat">
           ${icon(iconName)}
           <span>${title}</span>
           <strong>${amount}</strong>
           <small>${subtitle}</small>
+          ${navRoute ? `<p>${button('Ver ingresos →', 'nav', navRoute, 'ghost small')}</p>` : ''}
         </article>
       `).join('')}
     </section>
@@ -1846,6 +1910,7 @@ function petProfile() {
     esc(pet.name),
     `${esc(pet.species)} · ${esc(pet.breed)} · ${esc(pet.sex)} · ${age} años · ${esc(pet.weight)} kg`,
     button('Cambiar mascota', 'nav', 'pets') +
+    (canCreateTicket() ? button('Nuevo ticket', 'ticket-pet', pet.id) : '') +
     button('Solicitar turno', 'book', pet.id, 'primary')
   ) + `
     <section class="card">
@@ -1931,6 +1996,7 @@ function ownerProfile(id) {
     user.role === 'owner'
       ? button('Editar mis datos', 'edit', 'owners:' + owner.id)
       : button('Editar propietario', 'edit', 'owners:' + owner.id) +
+        (canCreateTicket() ? button('Nuevo ticket', 'ticket-owner', owner.id) : '') +
         button('+ Agregar mascota', 'pet-owner', owner.id, 'primary')
   ) + `
     <section class="card">
@@ -1960,6 +2026,8 @@ function ownerProfile(id) {
         '<p class="muted">Todavía no hay mascotas vinculadas.</p>'
       }
     </div>
+
+    ${ownerTicketsHTML(owner.id)}
   `;
 }
 
@@ -2053,6 +2121,7 @@ function genericView(collection) {
   if (collection === 'services') {
     headers = [
       'Servicio',
+      'Precio',
       'Duración',
       'Profesionales',
       'Estado',
@@ -2061,6 +2130,7 @@ function genericView(collection) {
 
     values = slice.map(service => [
       esc(service.name),
+      money(service.price || 0),
       esc(service.duration) + ' min',
       `
         <div class="wrap">
@@ -2651,6 +2721,8 @@ function appointmentDetails(id) {
               )
             : ''
         }
+
+        ${appointmentTicketButtons(appointment)}
       </div>
     `
   );
@@ -2930,6 +3002,18 @@ function renderContent() {
       html = remindersView();
       break;
 
+    case 'income':
+      html = incomeView();
+      break;
+
+    case 'tickets':
+      html = myTicketsView();
+      break;
+
+    case 'billing':
+      html = user.role === 'admin' ? incomeView() : myTicketsView();
+      break;
+
     case 'settings':
       html = heading(
         'Configuración',
@@ -2956,7 +3040,7 @@ function mayEdit(collection, id = '') {
   if (user.role === 'admin') return true;
 
   if (user.role === 'vet') {
-    return ['pets', 'owners', 'reminders'].includes(collection);
+    return ['pets', 'owners', 'reminders', 'tickets'].includes(collection);
   }
 
   return collection === 'owners' && id === user.ownerId;
@@ -3082,6 +3166,13 @@ function editForm(collection, id = '', preset = {}) {
         item.name,
         'text',
         'required'
+      ) +
+      field(
+        'price',
+        'Precio ($)',
+        item.price ?? 0,
+        'number',
+        'required min="0" step="0.01"'
       ) +
       field(
         'duration',
@@ -3614,6 +3705,13 @@ async function saveEntity(form) {
 
   if (collection === 'services') {
     data.duration = Number(data.duration);
+    data.price = Number(data.price);
+
+    if (!Number.isFinite(data.price) || data.price < 0) {
+      return fail('El precio debe ser un número mayor o igual a 0.');
+    }
+
+    data.price = Math.round(data.price * 100) / 100;
   }
 
   if (collection === 'schedules') {
@@ -4071,7 +4169,52 @@ async function submitForm(form) {
         petTab = 'Historia clínica';
         renderContent();
         toast('Atención registrada correctamente.');
+
+        if (
+          appointment &&
+          canCreateTicket() &&
+          (user.role !== 'vet' || appointment.vetId === user.vetId) &&
+          !activeTicketForAppointment(appointment.id)
+        ) {
+          modal(
+            'Atención registrada',
+            `
+              <p>
+                La atención de <b>${esc(pet.name)}</b> quedó registrada.
+                ¿Querés generar el ticket de cobro ahora?
+              </p>
+              <div class="form-actions">
+                ${button('Ahora no', 'close')}
+                ${button('Generar ticket', 'ticket-new', appointment.id, 'primary')}
+              </div>
+            `
+          );
+        }
       }
+      break;
+    }
+
+    case 'ticket':
+      await saveTicket(form);
+      break;
+
+    case 'ticket-void': {
+      const ticket = (db.tickets || []).find(
+        item => item.id === form.dataset.id
+      );
+
+      if (!ticket || user.role !== 'admin') {
+        return fail('No tenés permisos para anular tickets.');
+      }
+
+      const reason = String(data.reason || '').trim();
+
+      if (!reason) {
+        return fail('El motivo de anulación es obligatorio.');
+      }
+
+      draft.voidTicket = { id: ticket.id, reason };
+      voidTicketConfirm(ticket.id);
       break;
     }
 
@@ -4602,7 +4745,1884 @@ async function action(actionName, id, element) {
         );
       }
       break;
+
+    case 'ticket-new':
+      ticketForm(id);
+      break;
+
+    case 'ticket-create':
+      ticketForm('');
+      break;
+
+    case 'ticket-pet': {
+      const pet = find('pets', id);
+
+      if (!pet || !canCreateTicket() || !canPet(pet)) {
+        return toast('No se puede generar el ticket.');
+      }
+
+      ticketForm('', { ownerId: pet.ownerId, petId: pet.id });
+      break;
+    }
+
+    case 'ticket-owner': {
+      const owner = find('owners', id);
+
+      if (!owner || !canCreateTicket()) {
+        return toast('No se puede generar el ticket.');
+      }
+
+      ticketForm('', { ownerId: owner.id });
+      break;
+    }
+
+    case 'ticket-view':
+      ticketView(id);
+      break;
+
+    case 'ticket-print':
+      ticketPrint(id);
+      break;
+
+    case 'ticket-void':
+      voidTicketForm(id);
+      break;
+
+    case 'ticket-void-confirm':
+      voidTicketConfirm(id);
+      break;
+
+    case 'void-confirm':
+      doVoidTicket(id);
+      break;
+
+    case 'ticket-add':
+      ticketAddRow(id);
+      break;
+
+    case 'ticket-remove': {
+      const row = element?.closest('.ticket-row');
+
+      if (row) {
+        row.remove();
+        ticketRecalc();
+      }
+      break;
+    }
+
+    case 'billing-export':
+      billingExport();
+      break;
+
+    case 'income-day':
+      incomeDay = incomeDay === id ? '' : id;
+      renderContent();
+      break;
   }
+}
+
+// CAJA, TICKETS E INGRESOS
+
+const PAYMENT_METHODS = [
+  'Efectivo',
+  'Transferencia',
+  'Débito',
+  'Crédito',
+  'Mercado Pago'
+];
+
+function demoPastAppointments() {
+  return [
+    {
+      id: 'appt-demo-a',
+      petId: 'p1',
+      ownerId: 'o1',
+      serviceId: 's1',
+      vetId: 'v1',
+      date: addDays(today(), -4),
+      time: '10:00',
+      duration: 30,
+      status: 'Atendido',
+      reason: 'Control general',
+      observations: ''
+    },
+    {
+      id: 'appt-demo-b',
+      petId: 'p4',
+      ownerId: 'o2',
+      serviceId: 's3',
+      vetId: 'v2',
+      date: addDays(today(), -8),
+      time: '11:00',
+      duration: 30,
+      status: 'Atendido',
+      reason: 'Vacunación anual',
+      observations: ''
+    },
+    {
+      id: 'appt-demo-c',
+      petId: 'p6',
+      ownerId: 'o3',
+      serviceId: 's1',
+      vetId: 'v4',
+      date: addDays(today(), -12),
+      time: '09:30',
+      duration: 30,
+      status: 'Atendido',
+      reason: 'Consulta general',
+      observations: ''
+    },
+    {
+      id: 'appt-demo-d',
+      petId: 'p2',
+      ownerId: 'o1',
+      serviceId: 's1',
+      vetId: 'v1',
+      date: addDays(today(), -18),
+      time: '10:30',
+      duration: 30,
+      status: 'Atendido',
+      reason: 'Consulta general',
+      observations: ''
+    }
+  ];
+}
+
+function buildDemoTickets() {
+  const at = (daysAgo, time) =>
+    new Date(addDays(today(), daysAgo) + 'T' + time + ':00').toISOString();
+
+  const rows = [
+    {
+      daysAgo: 28,
+      time: '10:15',
+      appointmentId: '',
+      ownerId: 'o2',
+      petId: 'p4',
+      vetId: 'v2',
+      items: [
+        { type: 'service', refId: 's3', name: 'Vacunación', qty: 1, unitPrice: 12000 },
+        { type: 'product', refId: 'pr2', name: 'Pipeta para perros', qty: 1, unitPrice: 7200 }
+      ],
+      discount: 0,
+      paymentMethod: 'Efectivo',
+      status: 'Pagado',
+      notes: '',
+      createdBy: 'u-v2',
+      createdByName: 'Diego García'
+    },
+    {
+      daysAgo: 18,
+      time: '10:30',
+      appointmentId: 'appt-demo-d',
+      ownerId: 'o1',
+      petId: 'p2',
+      vetId: 'v1',
+      items: [
+        { type: 'service', refId: 's1', name: 'Consulta clínica', qty: 1, unitPrice: 15000 }
+      ],
+      discount: 0,
+      paymentMethod: 'Transferencia',
+      status: 'Pagado',
+      notes: '',
+      createdBy: 'u-v1',
+      createdByName: 'Lucía Martínez'
+    },
+    {
+      daysAgo: 21,
+      time: '11:00',
+      appointmentId: '',
+      ownerId: 'o2',
+      petId: 'p5',
+      vetId: 'v2',
+      items: [
+        { type: 'service', refId: 's5', name: 'Desparasitación', qty: 1, unitPrice: 8000 }
+      ],
+      discount: 0,
+      paymentMethod: 'Mercado Pago',
+      status: 'Pendiente',
+      notes: '',
+      createdBy: 'u-v2',
+      createdByName: 'Diego García'
+    },
+    {
+      daysAgo: 12,
+      time: '09:30',
+      appointmentId: 'appt-demo-c',
+      ownerId: 'o3',
+      petId: 'p6',
+      vetId: 'v4',
+      items: [
+        { type: 'service', refId: 's1', name: 'Consulta clínica', qty: 1, unitPrice: 15000 },
+        { type: 'custom', refId: '', name: 'Certificado de salud', qty: 1, unitPrice: 5000 }
+      ],
+      discount: 0,
+      paymentMethod: 'Efectivo',
+      status: 'Pagado',
+      notes: '',
+      createdBy: 'u-v4',
+      createdByName: 'Pablo Rodríguez'
+    },
+    {
+      daysAgo: 15,
+      time: '12:30',
+      appointmentId: '',
+      ownerId: 'o1',
+      petId: 'p3',
+      vetId: 'v3',
+      items: [
+        { type: 'service', refId: 's2', name: 'Ecografía', qty: 1, unitPrice: 28000 }
+      ],
+      discount: 0,
+      paymentMethod: 'Crédito',
+      status: 'Anulado',
+      notes: 'Ticket anulado de demostración.',
+      createdBy: 'u-v3',
+      createdByName: 'Ana López',
+      voidReason: 'Error en el medio de pago.'
+    },
+    {
+      daysAgo: 8,
+      time: '16:20',
+      appointmentId: 'appt-demo-b',
+      ownerId: 'o2',
+      petId: 'p4',
+      vetId: 'v2',
+      items: [
+        { type: 'service', refId: 's3', name: 'Vacunación', qty: 1, unitPrice: 12000 },
+        { type: 'product', refId: 'pr1', name: 'Alimento adulto balanceado', qty: 1, unitPrice: 18500 }
+      ],
+      discount: 1500,
+      paymentMethod: 'Transferencia',
+      status: 'Pagado',
+      notes: '',
+      createdBy: 'u-v2',
+      createdByName: 'Diego García'
+    },
+    {
+      daysAgo: 5,
+      time: '10:00',
+      appointmentId: '',
+      ownerId: 'o1',
+      petId: 'p3',
+      vetId: 'v1',
+      items: [
+        { type: 'service', refId: 's2', name: 'Ecografía', qty: 1, unitPrice: 28000 }
+      ],
+      discount: 0,
+      paymentMethod: 'Débito',
+      status: 'Pagado',
+      notes: '',
+      createdBy: 'u-v1',
+      createdByName: 'Lucía Martínez'
+    },
+    {
+      daysAgo: 0,
+      time: null,
+      appointmentId: '',
+      ownerId: 'o1',
+      petId: 'p1',
+      vetId: 'v1',
+      items: [
+        { type: 'service', refId: 's1', name: 'Consulta clínica', qty: 1, unitPrice: 15000 },
+        { type: 'product', refId: 'pr2', name: 'Pipeta para perros', qty: 1, unitPrice: 7200 }
+      ],
+      discount: 0,
+      paymentMethod: 'Efectivo',
+      status: 'Pagado',
+      notes: '',
+      createdBy: 'u-v1',
+      createdByName: 'Lucía Martínez'
+    },
+    {
+      daysAgo: 0,
+      time: null,
+      appointmentId: '',
+      ownerId: 'o2',
+      petId: 'p5',
+      vetId: 'v2',
+      items: [
+        { type: 'service', refId: 's4', name: 'Control', qty: 1, unitPrice: 9000 },
+        { type: 'product', refId: 'pr2', name: 'Pipeta para perros', qty: 1, unitPrice: 7200 }
+      ],
+      discount: 0,
+      paymentMethod: 'Débito',
+      status: 'Pagado',
+      notes: '',
+      createdBy: 'u-v2',
+      createdByName: 'Diego García'
+    },
+    {
+      daysAgo: 0,
+      time: null,
+      appointmentId: '',
+      ownerId: '',
+      petId: '',
+      vetId: 'v4',
+      items: [
+        { type: 'service', refId: 's4', name: 'Control', qty: 1, unitPrice: 9000 },
+        { type: 'custom', refId: '', name: 'Collar isabelino', qty: 1, unitPrice: 3500 }
+      ],
+      discount: 0,
+      paymentMethod: 'Efectivo',
+      status: 'Pagado',
+      notes: 'Venta de mostrador.',
+      createdBy: 'u-v4',
+      createdByName: 'Pablo Rodríguez'
+    }
+  ];
+
+  return rows.map((row, index) => {
+    const subtotal = round2(
+      row.items.reduce(
+        (sum, item) => sum + Number(item.qty || 0) * Number(item.unitPrice || 0),
+        0
+      )
+    );
+
+    return {
+      id: uid(),
+      number: ticketNumber(index + 1),
+      date: addDays(today(), -row.daysAgo),
+      createdAt: row.time ? at(row.daysAgo, row.time) : new Date().toISOString(),
+      appointmentId: row.appointmentId,
+      ownerId: row.ownerId,
+      petId: row.petId,
+      vetId: row.vetId,
+      items: row.items,
+      subtotal,
+      discount: row.discount,
+      total: round2(subtotal - row.discount),
+      paymentMethod: row.paymentMethod,
+      status: row.status,
+      notes: row.notes,
+      createdBy: row.createdBy,
+      createdByName: row.createdByName,
+      voidReason: row.voidReason || '',
+      voidedAt: row.status === 'Anulado'
+        ? at(Math.max(0, row.daysAgo - 1), row.time || '09:00')
+        : ''
+    };
+  });
+}
+
+function resetDemoTickets() {
+  if (!db?.configured) {
+    return 'No hay datos iniciales. Completá el setup primero.';
+  }
+
+  const demoTickets = buildDemoTickets();
+
+  const ok = commit(() => {
+    db.tickets = demoTickets;
+    db.config.ticketSeq = demoTickets.length;
+
+    demoPastAppointments().forEach(demo => {
+      if (!find('appointments', demo.id)) {
+        db.appointments.push({ ...demo });
+      }
+    });
+  });
+
+  if (ok && user) {
+    shell();
+  }
+
+  return ok
+    ? 'Tickets de demo regenerados: ' + demoTickets.length + ' tickets.'
+    : 'No se pudo regenerar.';
+}
+
+function round2(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+function ticketNumber(seq) {
+  return '0001-' + String(seq).padStart(8, '0');
+}
+
+function activeTicketForAppointment(appointmentId) {
+  if (!appointmentId) return null;
+
+  return (db.tickets || []).find(ticket =>
+    ticket.appointmentId === appointmentId && ticket.status !== 'Anulado'
+  ) || null;
+}
+
+function canSeeTicket(ticket) {
+  if (!user || !ticket) return false;
+  if (user.role === 'admin') return true;
+
+  if (user.role === 'vet') {
+    return ticket.vetId === user.vetId || ticket.createdBy === user.id;
+  }
+
+  if (user.role === 'owner') {
+    return Boolean(ticket.ownerId) && ticket.ownerId === user.ownerId;
+  }
+
+  return false;
+}
+
+function visibleTickets() {
+  return (db.tickets || []).filter(canSeeTicket);
+}
+
+function canCreateTicket() {
+  return Boolean(user) && ['admin', 'vet'].includes(user.role);
+}
+
+function appointmentTicketButtons(appointment) {
+  if (
+    !appointment ||
+    !['Confirmado', 'Atendido'].includes(appointment.status) ||
+    user.role === 'owner' ||
+    !canCreateTicket()
+  ) {
+    return '';
+  }
+
+  if (user.role === 'vet' && appointment.vetId !== user.vetId) {
+    return '';
+  }
+
+  const existing = activeTicketForAppointment(appointment.id);
+
+  if (existing && canSeeTicket(existing)) {
+    return button('Ver ticket', 'ticket-view', existing.id);
+  }
+
+  if (!existing) {
+    return button('Generar ticket', 'ticket-new', appointment.id, 'primary');
+  }
+
+  return '';
+}
+
+function ticketOwnerPets(ownerId) {
+  return db.pets.filter(pet =>
+    pet.active && (!ownerId || pet.ownerId === ownerId)
+  );
+}
+
+function ticketRowHTML(type = 'service', presetRef = '') {
+  const index = ++ticketItemCount;
+  const services = db.services.filter(service => service.active);
+  const products = db.products.filter(
+    product => product.active && Number(product.stock) > 0
+  );
+  const firstService = presetRef || services[0]?.id || '';
+  const firstProduct = products[0]?.id || '';
+  const refValue = type === 'product' ? firstProduct : firstService;
+  const refService = find('services', refValue);
+  const refProduct = find('products', refValue);
+  const startPrice = type === 'product'
+    ? refProduct?.price ?? 0
+    : refService?.price ?? 0;
+  const priceReadonly = type === 'service' && user.role !== 'admin';
+
+  return `
+    <div class="ticket-row" data-idx="${index}">
+      <label class="field">
+        Tipo
+        <select name="itemType" class="ticket-type" aria-label="Tipo de ítem">
+          <option value="service" ${type === 'service' ? 'selected' : ''}>Servicio</option>
+          <option value="product" ${type === 'product' ? 'selected' : ''}>Producto</option>
+          <option value="custom" ${type === 'custom' ? 'selected' : ''}>Ítem libre</option>
+        </select>
+      </label>
+      <label class="field ticket-ref-wrap" ${type === 'custom' ? 'hidden' : ''}>
+        Detalle
+        <select name="itemRef" class="ticket-ref" aria-label="Detalle del ítem">
+          ${type === 'product'
+            ? products.map(product => `
+              <option value="${esc(product.id)}" ${product.id === refValue ? 'selected' : ''}>
+                ${esc(product.name)} · ${money(product.price)} (${Number(product.stock)} disp.)
+              </option>
+            `).join('')
+            : services.map(service => `
+              <option value="${esc(service.id)}" ${service.id === refValue ? 'selected' : ''}>
+                ${esc(service.name)} · ${money(service.price || 0)}
+              </option>
+            `).join('')}
+        </select>
+      </label>
+      <label class="field ticket-name-wrap" ${type === 'custom' ? '' : 'hidden'}>
+        Nombre del ítem
+        <input name="itemName" type="text" value="" maxlength="80" aria-label="Nombre del ítem libre">
+      </label>
+      <label class="field">
+        Cant.
+        <input name="itemQty" class="ticket-qty" type="number" value="1" min="1" step="1" required aria-label="Cantidad">
+      </label>
+      <label class="field">
+        Precio ($)
+        <input
+          name="itemPrice"
+          class="ticket-price"
+          type="number"
+          value="${esc(startPrice)}"
+          min="0"
+          step="0.01"
+          required
+          ${priceReadonly ? 'readonly' : ''}
+          aria-label="Precio unitario"
+        >
+      </label>
+      <div class="field">
+        <span aria-hidden="true">&nbsp;</span>
+        ${button('Quitar', 'ticket-remove', String(index), 'small danger')}
+      </div>
+    </div>
+  `;
+}
+
+function ticketForm(appointmentId = '', preset = {}) {
+  if (!canCreateTicket()) {
+    return toast('No tenés permisos para generar tickets.');
+  }
+
+  const appointment = appointmentId
+    ? db.appointments.find(item => item.id === appointmentId)
+    : null;
+
+  if (appointmentId && !appointment) {
+    return toast('Turno no disponible.');
+  }
+
+  if (appointment) {
+    if (
+      user.role === 'vet' &&
+      appointment.vetId !== user.vetId
+    ) {
+      return toast('No tenés permisos para facturar este turno.');
+    }
+
+    if (!['Confirmado', 'Atendido'].includes(appointment.status)) {
+      return toast('Solo se puede facturar un turno confirmado o atendido.');
+    }
+
+    if (activeTicketForAppointment(appointment.id)) {
+      return toast('Este turno ya tiene un ticket activo.');
+    }
+  }
+
+  ticketItemCount = 0;
+
+  const ownerId = appointment?.ownerId || preset.ownerId || '';
+  const petId = appointment?.petId || preset.petId || '';
+  const vetId = user.role === 'vet'
+    ? user.vetId
+    : appointment?.vetId || preset.vetId || '';
+  const owner = ownerId ? find('owners', ownerId) : null;
+  const pet = petId ? find('pets', petId) : null;
+  const vet = vetId ? find('vets', vetId) : null;
+  const owners = db.owners.filter(item => item.active);
+  const petOptions = appointment
+    ? (pet ? [[pet.id, pet.name]] : [])
+    : [['', 'Sin mascota'], ...ticketOwnerPets(ownerId).map(item => [item.id, item.name + ' · ' + label('owners', item.ownerId)])];
+  const vetOptions = [['', 'Sin asignar'], ...db.vets.filter(item => item.active).map(item => [item.id, item.name])];
+
+  const head = appointment
+    ? `
+      <div class="hint">
+        Turno ${esc(appointment.status.toLowerCase())}: <b>${esc(pet?.name || '')}</b> ·
+        ${esc(label('services', appointment.serviceId))} ·
+        ${pretty(appointment.date)} ${esc(appointment.time)}
+      </div>
+      <br>
+      <input type="hidden" name="ownerId" value="${esc(ownerId)}">
+      <input type="hidden" name="petId" value="${esc(petId)}">
+      <input type="hidden" name="vetId" value="${esc(vetId)}">
+      <p>
+        <small>Propietario</small><br>
+        <b>${esc(owner?.name || 'Cliente mostrador')}</b>
+      </p>
+      <p>
+        <small>Mascota</small><br>
+        <b>${esc(pet?.name || '—')}</b>
+      </p>
+      <p>
+        <small>Profesional</small><br>
+        <b>${esc(vet?.name || '—')}</b>
+      </p>
+    `
+    : select(
+      'ownerId',
+      'Propietario',
+      [['', 'Cliente mostrador'], ...owners.map(item => [item.id, item.name])],
+      ownerId
+    ) +
+    select(
+      'petId',
+      'Mascota (opcional)',
+      petOptions,
+      pet && petOptions.some(([value]) => String(value) === String(pet.id)) ? pet.id : ''
+    ) +
+    select('vetId', 'Profesional (opcional)', vetOptions, vetId);
+
+  modal(
+    appointment ? 'Generar ticket del turno' : 'Nuevo ticket de mostrador',
+    formWrap(
+      'ticket',
+      head +
+      `
+        <div class="full">
+          <h3>Ítems</h3>
+          <div id="ticket-items">
+            ${ticketRowHTML('service', appointment?.serviceId || '')}
+          </div>
+          <div class="row">
+            ${button('+ Servicio', 'ticket-add', 'service', 'small')}
+            ${button('+ Producto', 'ticket-add', 'product', 'small')}
+            ${button('+ Ítem libre', 'ticket-add', 'custom', 'small')}
+          </div>
+        </div>
+      ` +
+      field('discount', 'Descuento ($)', '0', 'number', 'min="0" step="0.01"') +
+      select('paymentMethod', 'Medio de pago', PAYMENT_METHODS, 'Efectivo', 'required') +
+      select('status', 'Estado', ['Pagado', 'Pendiente'], 'Pagado', 'required') +
+      area('notes', 'Notas (opcional)', '') +
+      `
+        <div class="full">
+          <div class="hint" id="ticket-total" role="status" aria-live="polite">Total: $0</div>
+        </div>
+      `,
+      appointmentId
+    )
+  );
+
+  ticketRecalc();
+}
+
+function ticketAddRow(type) {
+  const container = $('#ticket-items');
+
+  if (!container) return;
+
+  container.insertAdjacentHTML(
+    'beforeend',
+    ticketRowHTML(['service', 'product', 'custom'].includes(type) ? type : 'service')
+  );
+
+  ticketRecalc();
+}
+
+function ticketUpdateRow(row) {
+  const type = row.querySelector('.ticket-type').value;
+  const refWrap = row.querySelector('.ticket-ref-wrap');
+  const ref = row.querySelector('.ticket-ref');
+  const nameWrap = row.querySelector('.ticket-name-wrap');
+  const price = row.querySelector('.ticket-price');
+
+  if (type === 'custom') {
+    refWrap.hidden = true;
+    nameWrap.hidden = false;
+    price.readOnly = false;
+    price.value = '0';
+  } else {
+    refWrap.hidden = false;
+    nameWrap.hidden = true;
+
+    if (type === 'product') {
+      ref.innerHTML = db.products
+        .filter(product => product.active && Number(product.stock) > 0)
+        .map(product => `
+          <option value="${esc(product.id)}">
+            ${esc(product.name)} · ${money(product.price)} (${Number(product.stock)} disp.)
+          </option>
+        `).join('');
+
+      const first = db.products.find(
+        product => product.active && Number(product.stock) > 0
+      );
+
+      price.value = first?.price ?? 0;
+      price.readOnly = true;
+    } else {
+      ref.innerHTML = db.services
+        .filter(service => service.active)
+        .map(service => `
+          <option value="${esc(service.id)}">
+            ${esc(service.name)} · ${money(service.price || 0)}
+          </option>
+        `).join('');
+
+      const first = db.services.find(service => service.active);
+
+      price.value = first?.price ?? 0;
+      price.readOnly = user.role !== 'admin';
+    }
+  }
+}
+
+function ticketRecalc() {
+  const form = $('#modal form[data-form=ticket]');
+  const totalBox = $('#ticket-total');
+
+  if (!form || !totalBox) return;
+
+  let subtotal = 0;
+
+  form.querySelectorAll('.ticket-row').forEach(row => {
+    const qty = Number(row.querySelector('.ticket-qty')?.value || 0);
+    const price = Number(row.querySelector('.ticket-price')?.value || 0);
+
+    if (Number.isFinite(qty) && Number.isFinite(price) && qty > 0 && price >= 0) {
+      subtotal += qty * price;
+    }
+  });
+
+  const discount = Number(form.elements.discount?.value || 0);
+  const total = Math.max(0, round2(subtotal) - (Number.isFinite(discount) ? discount : 0));
+
+  totalBox.textContent = 'Subtotal: ' + money(round2(subtotal)) +
+    ' · Descuento: ' + money(Number.isFinite(discount) ? discount : 0) +
+    ' · Total: ' + money(total);
+}
+
+async function saveTicket(form) {
+  if (!canCreateTicket()) {
+    return fail('No tenés permisos para generar tickets.');
+  }
+
+  const appointmentId = form.dataset.id || '';
+  const appointment = appointmentId
+    ? db.appointments.find(item => item.id === appointmentId)
+    : null;
+
+  let ownerId = String(form.elements.ownerId?.value || '');
+  let petId = String(form.elements.petId?.value || '');
+  let vetId = String(form.elements.vetId?.value || '');
+
+  if (appointment) {
+    if (!['Confirmado', 'Atendido'].includes(appointment.status)) {
+      return fail('Solo se puede facturar un turno confirmado o atendido.');
+    }
+
+    if (
+      user.role === 'vet' &&
+      appointment.vetId !== user.vetId
+    ) {
+      return fail('No tenés permisos para facturar este turno.');
+    }
+
+    if (activeTicketForAppointment(appointment.id)) {
+      return fail('Este turno ya tiene un ticket activo.');
+    }
+
+    ownerId = appointment.ownerId;
+    petId = appointment.petId;
+    vetId = appointment.vetId;
+  }
+
+  if (user.role === 'vet') {
+    vetId = user.vetId;
+  }
+
+  if (ownerId && !find('owners', ownerId)?.active) {
+    return fail('Seleccioná un propietario activo o Cliente mostrador.');
+  }
+
+  if (petId) {
+    const pet = find('pets', petId);
+
+    if (!pet) {
+      return fail('Mascota no disponible.');
+    }
+
+    if (ownerId && pet.ownerId !== ownerId) {
+      return fail('La mascota no pertenece al propietario seleccionado.');
+    }
+  }
+
+  if (vetId && !find('vets', vetId)) {
+    return fail('Profesional no disponible.');
+  }
+
+  const rows = [...form.querySelectorAll('.ticket-row')];
+
+  if (!rows.length) {
+    return fail('Agregá al menos un ítem al ticket.');
+  }
+
+  const items = [];
+  const needed = {};
+
+  for (const row of rows) {
+    const type = row.querySelector('.ticket-type')?.value;
+    const refId = row.querySelector('.ticket-ref')?.value || '';
+    const customName = String(
+      row.querySelector('.ticket-name')?.value ||
+      row.querySelector('[name=itemName]')?.value ||
+      ''
+    ).trim();
+    const qty = Number(row.querySelector('.ticket-qty')?.value);
+    const rawPrice = Number(row.querySelector('.ticket-price')?.value);
+
+    if (!['service', 'product', 'custom'].includes(type)) {
+      return fail('Tipo de ítem no válido.');
+    }
+
+    if (!Number.isInteger(qty) || qty < 1) {
+      return fail('Las cantidades deben ser enteros mayores o iguales a 1.');
+    }
+
+    if (type === 'service') {
+      const service = find('services', refId);
+
+      if (!service) {
+        return fail('Seleccioná un servicio válido.');
+      }
+
+      const unitPrice = user.role === 'admin' ? rawPrice : Number(service.price || 0);
+
+      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+        return fail('Los precios deben ser mayores o iguales a 0.');
+      }
+
+      items.push({
+        type: 'service',
+        refId: service.id,
+        name: service.name,
+        qty,
+        unitPrice: round2(unitPrice)
+      });
+    }
+
+    if (type === 'product') {
+      const product = find('products', refId);
+
+      if (!product || !product.active) {
+        return fail('Seleccioná un producto activo con stock.');
+      }
+
+      if (!Number.isFinite(Number(product.price)) || Number(product.price) < 0) {
+        return fail('El producto tiene un precio no válido.');
+      }
+
+      needed[product.id] = (needed[product.id] || 0) + qty;
+
+      items.push({
+        type: 'product',
+        refId: product.id,
+        name: product.name,
+        qty,
+        unitPrice: round2(product.price)
+      });
+    }
+
+    if (type === 'custom') {
+      if (!customName) {
+        return fail('El ítem libre necesita un nombre.');
+      }
+
+      if (!Number.isFinite(rawPrice) || rawPrice < 0) {
+        return fail('Los precios deben ser mayores o iguales a 0.');
+      }
+
+      items.push({
+        type: 'custom',
+        refId: '',
+        name: customName.slice(0, 80),
+        qty,
+        unitPrice: round2(rawPrice)
+      });
+    }
+  }
+
+  for (const [productId, qty] of Object.entries(needed)) {
+    const product = find('products', productId);
+
+    if (Number(product.stock) < qty) {
+      return fail(
+        'Stock insuficiente de "' + product.name +
+        '". Disponible: ' + Number(product.stock) + '.'
+      );
+    }
+  }
+
+  const subtotal = round2(
+    items.reduce((sum, item) => sum + item.qty * item.unitPrice, 0)
+  );
+  const discount = Number(form.elements.discount?.value || 0);
+
+  if (!Number.isFinite(discount) || discount < 0) {
+    return fail('El descuento debe ser mayor o igual a 0.');
+  }
+
+  if (round2(discount) > subtotal) {
+    return fail('El descuento no puede superar el subtotal.');
+  }
+
+  const total = round2(subtotal - round2(discount));
+
+  if (!Number.isFinite(total) || total < 0) {
+    return fail('El total no es válido.');
+  }
+
+  const paymentMethod = String(form.elements.paymentMethod?.value || '');
+  const status = String(form.elements.status?.value || '');
+  const notes = String(form.elements.notes?.value || '').trim().slice(0, 500);
+
+  if (!PAYMENT_METHODS.includes(paymentMethod)) {
+    return fail('Seleccioná un medio de pago válido.');
+  }
+
+  if (!['Pagado', 'Pendiente'].includes(status)) {
+    return fail('Estado no válido.');
+  }
+
+  const ticketId = uid();
+  let ticketSeq = 0;
+
+  const ok = commit(() => {
+    if (
+      appointmentId &&
+      activeTicketForAppointment(appointmentId)
+    ) {
+      throw new Error('Este turno ya tiene un ticket activo.');
+    }
+
+    for (const [productId, qty] of Object.entries(needed)) {
+      const product = find('products', productId);
+
+      if (Number(product.stock) < qty) {
+        throw new Error('Stock insuficiente de "' + product.name + '".');
+      }
+    }
+
+    db.config.ticketSeq = Number(db.config.ticketSeq || 0) + 1;
+    ticketSeq = db.config.ticketSeq;
+
+    db.tickets.push({
+      id: ticketId,
+      number: ticketNumber(ticketSeq),
+      date: today(),
+      createdAt: new Date().toISOString(),
+      appointmentId,
+      ownerId,
+      petId,
+      vetId,
+      items,
+      subtotal,
+      discount: round2(discount),
+      total,
+      paymentMethod,
+      status,
+      notes,
+      createdBy: user.id,
+      createdByName: user.name,
+      voidReason: '',
+      voidedAt: ''
+    });
+
+    for (const [productId, qty] of Object.entries(needed)) {
+      find('products', productId).stock = Number(
+        find('products', productId).stock
+      ) - qty;
+    }
+  });
+
+  if (ok) {
+    close();
+    shell();
+    toast('Ticket N° ' + ticketNumber(ticketSeq) + ' generado.');
+    ticketView(ticketId);
+  }
+}
+
+function ticketView(id) {
+  const ticket = (db.tickets || []).find(item => item.id === id);
+
+  if (!ticket || !canSeeTicket(ticket)) {
+    return toast('Comprobante no disponible.');
+  }
+
+  const owner = ticket.ownerId ? find('owners', ticket.ownerId) : null;
+  const pet = ticket.petId ? find('pets', ticket.petId) : null;
+  const vet = ticket.vetId ? find('vets', ticket.vetId) : null;
+
+  modal(
+    'Ticket ' + ticket.number,
+    `
+      <div class="ticket">
+        <p class="center">
+          <b>${esc(db.config.name)}</b><br>
+          <small>
+            ${esc(db.config.address || '')} ·
+            ${esc(db.config.phone || '')}
+          </small>
+        </p>
+        <p>
+          <small>N°</small><br>
+          <b>${esc(ticket.number)}</b><br>
+          <small>${pretty(ticket.date)} · ${esc(ticket.paymentMethod)} · ${badge(ticket.status)}</small>
+        </p>
+        <p>
+          <small>Cliente</small><br>
+          ${esc(owner?.name || 'Cliente mostrador')}
+          ${pet ? '<br><small>Mascota: ' + esc(pet.name) + '</small>' : ''}
+          ${vet ? '<br><small>Profesional: ' + esc(vet.name) + '</small>' : ''}
+        </p>
+        ${table(
+          ['Ítem', 'Cant.', 'Precio', 'Total'],
+          ticket.items.map(item => [
+            esc(item.name),
+            esc(item.qty),
+            money(item.unitPrice),
+            money(round2(item.qty * item.unitPrice))
+          ])
+        )}
+        <p>
+          Subtotal: <b>${money(ticket.subtotal)}</b><br>
+          Descuento: <b>${money(ticket.discount)}</b><br>
+          Total: <b>${money(ticket.total)}</b>
+        </p>
+        ${ticket.notes ? '<p><small>Notas: ' + esc(ticket.notes) + '</small></p>' : ''}
+        ${ticket.status === 'Anulado'
+          ? '<p><small>Anulado: ' + esc(ticket.voidReason || '') + ' · ' + esc(ticket.voidedAt || '') + '</small></p>'
+          : ''}
+        <p class="center muted">
+          <small>Comprobante interno. No válido como factura.</small>
+        </p>
+        <div class="row">
+          ${button('Imprimir', 'ticket-print', ticket.id)}
+          ${user.role === 'admin' && ticket.status !== 'Anulado'
+            ? button('Anular', 'ticket-void', ticket.id, 'danger')
+            : ''}
+          ${button('Cerrar', 'close', '', 'primary')}
+        </div>
+      </div>
+    `
+  );
+}
+
+function ticketPrint(id) {
+  const ticket = (db.tickets || []).find(item => item.id === id);
+
+  if (!ticket || !canSeeTicket(ticket)) {
+    return toast('Comprobante no disponible.');
+  }
+
+  const owner = ticket.ownerId ? find('owners', ticket.ownerId) : null;
+  const pet = ticket.petId ? find('pets', ticket.petId) : null;
+  const vet = ticket.vetId ? find('vets', ticket.vetId) : null;
+  const win = window.open('', '_blank', 'width=320,height=600');
+
+  if (!win) {
+    return toast('El navegador bloqueó la ventana de impresión.');
+  }
+
+  win.document.write(`
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+      <meta charset="UTF-8">
+      <title>Ticket ${esc(ticket.number)}</title>
+      <style>
+        @page { size: 80mm auto; margin: 4mm; }
+        body { font-family: monospace, Arial, sans-serif; font-size: 12px; color: #111; max-width: 72mm; margin: 0 auto; }
+        h1 { font-size: 14px; text-align: center; margin: 6px 0; }
+        table { width: 100%; border-collapse: collapse; font-size: 11px; }
+        td, th { border-bottom: 1px dashed #999; padding: 3px 2px; text-align: left; }
+        .center { text-align: center; }
+        .total { font-size: 14px; font-weight: bold; }
+      </style>
+    </head>
+    <body>
+      <h1>${esc(db.config.name)}</h1>
+      <p class="center">${esc(db.config.address || '')}<br>${esc(db.config.phone || '')}</p>
+      <p>Ticket: <b>${esc(ticket.number)}</b><br>Fecha: ${esc(ticket.date)}<br>Cliente: ${esc(owner?.name || 'Cliente mostrador')}${pet ? '<br>Mascota: ' + esc(pet.name) : ''}${vet ? '<br>Profesional: ' + esc(vet.name) : ''}</p>
+      <table>
+        <tr><th>Ítem</th><th>Cant.</th><th>Total</th></tr>
+        ${ticket.items.map(item => `
+          <tr>
+            <td>${esc(item.name)}<br><small>${money(item.unitPrice)} c/u</small></td>
+            <td>${esc(item.qty)}</td>
+            <td>${money(round2(item.qty * item.unitPrice))}</td>
+          </tr>
+        `).join('')}
+      </table>
+      <p>Subtotal: ${money(ticket.subtotal)}<br>Descuento: ${money(ticket.discount)}<br><span class="total">Total: ${money(ticket.total)}</span><br>Pago: ${esc(ticket.paymentMethod)} · ${esc(ticket.status)}</p>
+      <p class="center">Comprobante interno. No válido como factura.</p>
+    </body>
+    </html>
+  `);
+
+  win.document.close();
+  win.focus();
+  win.print();
+}
+
+function voidTicketForm(id) {
+  const ticket = (db.tickets || []).find(item => item.id === id);
+
+  if (!ticket || user.role !== 'admin') {
+    return toast('No tenés permisos para anular tickets.');
+  }
+
+  if (ticket.status === 'Anulado') return;
+
+  modal(
+    'Anular ticket ' + ticket.number,
+    formWrap(
+      'ticket-void',
+      area('reason', 'Motivo de anulación (obligatorio)', ''),
+      ticket.id
+    )
+  );
+}
+
+function voidTicketConfirm(id) {
+  const ticket = (db.tickets || []).find(item => item.id === id);
+  const reason = String(draft.voidTicket?.reason || '').trim();
+
+  if (
+    !ticket ||
+    user.role !== 'admin' ||
+    !draft.voidTicket ||
+    draft.voidTicket.id !== id
+  ) {
+    return;
+  }
+
+  modal(
+    'Confirmar anulación',
+    `
+      <p>
+        ¿Querés anular el ticket <b>${esc(ticket.number)}</b>
+        por <b>${money(ticket.total)}</b>?
+      </p>
+      <p class="muted">Motivo: ${esc(reason)}</p>
+      <p class="muted">Se repondrá el stock de los productos.</p>
+      <div class="form-actions">
+        ${button('Volver', 'close')}
+        ${button('Confirmar anulación', 'void-confirm', id, 'danger')}
+      </div>
+    `
+  );
+}
+
+function doVoidTicket(id) {
+  const ticket = (db.tickets || []).find(item => item.id === id);
+  const reason = String(draft.voidTicket?.reason || '').trim();
+
+  if (!ticket || user.role !== 'admin' || !reason) return;
+
+  if (ticket.status === 'Anulado') {
+    draft.voidTicket = null;
+    return;
+  }
+
+  if (commit(() => {
+    ticket.status = 'Anulado';
+    ticket.voidReason = reason.slice(0, 300);
+    ticket.voidedAt = new Date().toISOString();
+
+    ticket.items
+      .filter(item => item.type === 'product' && item.refId)
+      .forEach(item => {
+        const product = find('products', item.refId);
+
+        if (product) {
+          product.stock = Number(product.stock || 0) + Number(item.qty || 0);
+        }
+      });
+  })) {
+    draft.voidTicket = null;
+    close();
+    shell();
+    toast('Ticket ' + ticket.number + ' anulado.');
+  }
+}
+
+function billingRange() {
+  const now = new Date();
+  const firstOfMonth = localDate(
+    new Date(now.getFullYear(), now.getMonth(), 1)
+  );
+  const firstOfPrev = localDate(
+    new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  );
+  const lastOfPrev = localDate(new Date(now.getFullYear(), now.getMonth(), 0));
+
+  if (billingPeriod === 'week') {
+    return [addDays(today(), -6), today()];
+  }
+
+  if (billingPeriod === 'month') {
+    return [firstOfMonth, today()];
+  }
+
+  if (billingPeriod === 'prev') {
+    return [firstOfPrev, lastOfPrev];
+  }
+
+  if (billingPeriod === 'custom') {
+    const from = billingFrom || today();
+    const to = billingTo || today();
+
+    return from <= to ? [from, to] : [to, from];
+  }
+
+  return [today(), today()];
+}
+
+function propBar(pct) {
+  const safe = Math.max(0, Math.min(100, Number(pct) || 0));
+
+  return `
+    <div class="bar" role="presentation">
+      <span style="width:${safe.toFixed(1)}%"></span>
+    </div>
+  `;
+}
+
+function ticketHour(ticket) {
+  const time = new Date(ticket.createdAt);
+
+  if (Number.isNaN(time.getTime())) return '—';
+
+  return time.toLocaleTimeString('es-AR', {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function ticketActions(ticket, withVoid) {
+  return button('Ver', 'ticket-view', ticket.id, 'small') + ' ' +
+    button('Imprimir', 'ticket-print', ticket.id, 'small') +
+    (
+      withVoid && user.role === 'admin' && ticket.status !== 'Anulado'
+        ? ' ' + button('Anular', 'ticket-void', ticket.id, 'small danger')
+        : ''
+    );
+}
+
+function myTicketsView() {
+  if (!canCreateTicket()) {
+    return '<div class="empty">Acceso restringido.</div>';
+  }
+
+  const q = query.trim().toLowerCase();
+  const rows = visibleTickets()
+    .filter(ticket => {
+      if (!q) return true;
+
+      const owner = ticket.ownerId
+        ? label('owners', ticket.ownerId)
+        : 'Cliente mostrador';
+      const pet = ticket.petId ? label('pets', ticket.petId) : '';
+
+      return (ticket.number + ' ' + owner + ' ' + pet)
+        .toLowerCase()
+        .includes(q);
+    })
+    .filter(ticket => !filter || ticket.status === filter)
+    .sort((a, b) =>
+      b.date.localeCompare(a.date) ||
+      String(b.createdAt).localeCompare(String(a.createdAt))
+    );
+  const [slice, pager] = pageRows(rows);
+
+  return heading(
+    'Mis tickets',
+    'Tus tickets de cobro.',
+    button('+ Nuevo ticket', 'ticket-create', '', 'primary')
+  ) + `
+    <section class="card">
+      ${toolbar(['Pagado', 'Pendiente', 'Anulado'])}
+      ${table(
+        ['N°', 'Fecha', 'Cliente / mascota', 'Total', 'Medio de pago', 'Estado', 'Acciones'],
+        slice.map(ticket => {
+          const owner = ticket.ownerId ? find('owners', ticket.ownerId) : null;
+          const pet = ticket.petId ? find('pets', ticket.petId) : null;
+
+          return [
+            esc(ticket.number),
+            pretty(ticket.date),
+            esc(owner?.name || 'Cliente mostrador') +
+              (pet ? '<br><small>' + esc(pet.name) + '</small>' : ''),
+            money(ticket.total),
+            esc(ticket.paymentMethod),
+            badge(ticket.status),
+            ticketActions(ticket, false)
+          ];
+        })
+      )}
+      ${pager}
+    </section>
+  `;
+}
+
+function incomeView() {
+  if (user.role !== 'admin') {
+    return '<div class="empty">Acceso restringido.</div>';
+  }
+
+  return heading(
+    'Ingresos',
+    'Registro central de cobros de la veterinaria.',
+    button('+ Nuevo ticket', 'ticket-create', '', 'primary')
+  ) + incomeToday() + incomeHistory() + incomeSummaryBlock();
+}
+
+function incomeToday() {
+  const day = today();
+  const rows = visibleTickets()
+    .filter(ticket => ticket.date === day)
+    .sort((a, b) =>
+      String(b.createdAt).localeCompare(String(a.createdAt))
+    );
+  const paid = rows.filter(ticket => ticket.status === 'Pagado');
+  const pendingToday = rows.filter(ticket => ticket.status === 'Pendiente');
+  const pendingAll = visibleTickets()
+    .filter(ticket => ticket.status === 'Pendiente');
+  const total = round2(
+    paid.reduce((sum, ticket) => sum + Number(ticket.total || 0), 0)
+  );
+  const pendingTotal = round2(
+    pendingAll.reduce((sum, ticket) => sum + Number(ticket.total || 0), 0)
+  );
+  const avg = paid.length ? round2(total / paid.length) : 0;
+
+  return `
+    <h2>Hoy</h2>
+
+    <section class="stats">
+      <article class="card stat">
+        ${icon('receipt')}
+        <span>Monto de hoy</span>
+        <strong>${money(total)}</strong>
+        <small>${paid.length} tickets pagados</small>
+      </article>
+      <article class="card stat">
+        ${icon('receipt')}
+        <span>Tickets de hoy</span>
+        <strong>${paid.length + pendingToday.length}</strong>
+        <small>${paid.length} pagados · ${pendingToday.length} pendientes</small>
+      </article>
+      <article class="card stat">
+        ${icon('receipt')}
+        <span>Ticket promedio de hoy</span>
+        <strong>${money(avg)}</strong>
+        <small>Promedio por cobro</small>
+      </article>
+      <article class="card stat">
+        ${icon('receipt')}
+        <span>Por cobrar</span>
+        <strong>${money(pendingTotal)}</strong>
+        <small>${pendingAll.length} pendientes en total</small>
+      </article>
+    </section>
+
+    ${rows.length
+      ? `
+        <section class="card">
+          <h2>Tickets de hoy</h2>
+          ${table(
+            ['N°', 'Hora', 'Cliente / mascota', 'Profesional', 'Total', 'Medio de pago', 'Estado', 'Acciones'],
+            rows.map(ticket => {
+              const owner = ticket.ownerId ? find('owners', ticket.ownerId) : null;
+              const pet = ticket.petId ? find('pets', ticket.petId) : null;
+
+              return [
+                ticket.status === 'Anulado'
+                  ? '<s>' + esc(ticket.number) + '</s>'
+                  : esc(ticket.number),
+                esc(ticketHour(ticket)),
+                esc(owner?.name || 'Cliente mostrador') +
+                  (pet ? '<br><small>' + esc(pet.name) + '</small>' : ''),
+                esc(ticket.vetId ? label('vets', ticket.vetId) : '—'),
+                money(ticket.total),
+                esc(ticket.paymentMethod),
+                badge(ticket.status),
+                ticketActions(ticket, true)
+              ];
+            })
+          )}
+        </section>
+      `
+      : `
+        <div class="empty">
+          Todavía no hay tickets hoy.
+          <br><br>
+          ${button('+ Generar ticket', 'ticket-create', '', 'primary')}
+        </div>
+      `}
+  `;
+}
+
+function incomePeriodTickets(from, to) {
+  const q = query.trim().toLowerCase();
+
+  return visibleTickets()
+    .filter(ticket => ticket.date >= from && ticket.date <= to)
+    .filter(ticket => !filter || ticket.status === filter)
+    .filter(ticket => {
+      if (!q) return true;
+
+      const owner = ticket.ownerId
+        ? label('owners', ticket.ownerId)
+        : 'Cliente mostrador';
+      const pet = ticket.petId ? label('pets', ticket.petId) : '';
+
+      return (ticket.number + ' ' + owner + ' ' + pet)
+        .toLowerCase()
+        .includes(q);
+    })
+    .sort((a, b) =>
+      b.date.localeCompare(a.date) ||
+      String(b.createdAt).localeCompare(String(a.createdAt))
+    );
+}
+
+function incomeHistory() {
+  const [from, to] = billingRange();
+  const rows = incomePeriodTickets(from, to);
+  const paid = rows.filter(ticket => ticket.status === 'Pagado');
+  const pending = rows.filter(ticket => ticket.status === 'Pendiente');
+  const periodTotal = round2(
+    paid.reduce((sum, ticket) => sum + Number(ticket.total || 0), 0)
+  );
+  const pendingTotal = round2(
+    pending.reduce((sum, ticket) => sum + Number(ticket.total || 0), 0)
+  );
+
+  const groups = {};
+
+  rows.forEach(ticket => {
+    (groups[ticket.date] ||= []).push(ticket);
+  });
+
+  const days = Object.keys(groups).sort().reverse();
+
+  const dayList = days.length
+    ? days.map(day => {
+      const items = groups[day];
+      const dayPaid = items.filter(ticket => ticket.status === 'Pagado');
+      const dayTotal = round2(
+        dayPaid.reduce((sum, ticket) => sum + Number(ticket.total || 0), 0)
+      );
+      const byMethod = {};
+
+      dayPaid.forEach(ticket => {
+        byMethod[ticket.paymentMethod] =
+          (byMethod[ticket.paymentMethod] || 0) + Number(ticket.total || 0);
+      });
+
+      const breakdown = Object.entries(byMethod).length
+        ? Object.entries(byMethod)
+          .map(([name, value]) => esc(name) + ' ' + money(value))
+          .join(' · ')
+        : 'Sin cobros';
+      const open = incomeDay === day;
+
+      return `
+        <article class="card">
+          <div class="row between">
+            <div>
+              <b>${pretty(day)}</b>
+              <br>
+              <small>
+                ${items.length} tickets · Total: ${money(dayTotal)}
+                <br>${breakdown}
+              </small>
+            </div>
+            ${button(open ? 'Ocultar' : 'Ver tickets', 'income-day', day, 'small')}
+          </div>
+          ${open
+            ? table(
+              ['N°', 'Hora', 'Cliente / mascota', 'Total', 'Medio de pago', 'Estado', 'Acciones'],
+              items.map(ticket => {
+                const owner = ticket.ownerId ? find('owners', ticket.ownerId) : null;
+                const pet = ticket.petId ? find('pets', ticket.petId) : null;
+
+                return [
+                  ticket.status === 'Anulado'
+                    ? '<s>' + esc(ticket.number) + '</s>'
+                    : esc(ticket.number),
+                  esc(ticketHour(ticket)),
+                  esc(owner?.name || 'Cliente mostrador') +
+                    (pet ? '<br><small>' + esc(pet.name) + '</small>' : ''),
+                  money(ticket.total),
+                  esc(ticket.paymentMethod),
+                  badge(ticket.status),
+                  ticketActions(ticket, true)
+                ];
+              })
+            )
+            : ''}
+        </article>
+      `;
+    }).join('')
+    : `
+      <div class="empty">
+        No hay tickets en el período ${pretty(from)} – ${pretty(to)}.
+      </div>
+    `;
+
+  const [slice, pager] = pageRows(rows);
+
+  return `
+    <h2>Registro por día</h2>
+
+    <section class="card">
+      <div class="toolbar">
+        <select id="billing-period" aria-label="Período del registro">
+          <option value="week" ${billingPeriod === 'week' ? 'selected' : ''}>Últimos 7 días</option>
+          <option value="month" ${billingPeriod === 'month' ? 'selected' : ''}>Este mes</option>
+          <option value="prev" ${billingPeriod === 'prev' ? 'selected' : ''}>Mes anterior</option>
+          <option value="custom" ${billingPeriod === 'custom' ? 'selected' : ''}>Rango personalizado</option>
+        </select>
+        ${billingPeriod === 'custom'
+          ? `
+            <input type="date" id="billing-from" value="${esc(from)}" aria-label="Desde">
+            <input type="date" id="billing-to" value="${esc(to)}" aria-label="Hasta">
+          `
+          : ''}
+      </div>
+      <p class="muted">
+        Período: ${pretty(from)} – ${pretty(to)}.
+        Agrupado por fecha del ticket. Solo suma lo Pagado.
+      </p>
+    </section>
+
+    ${dayList}
+
+    <section class="card">
+      <h2>Detalle del período</h2>
+      ${toolbar(['Pagado', 'Pendiente', 'Anulado'])}
+      ${table(
+        ['N°', 'Fecha', 'Cliente / mascota', 'Total', 'Medio de pago', 'Estado', 'Acciones'],
+        slice.map(ticket => {
+          const owner = ticket.ownerId ? find('owners', ticket.ownerId) : null;
+          const pet = ticket.petId ? find('pets', ticket.petId) : null;
+
+          return [
+            ticket.status === 'Anulado'
+              ? '<s>' + esc(ticket.number) + '</s>'
+              : esc(ticket.number),
+            pretty(ticket.date),
+            esc(owner?.name || 'Cliente mostrador') +
+              (pet ? '<br><small>' + esc(pet.name) + '</small>' : ''),
+            money(ticket.total),
+            esc(ticket.paymentMethod),
+            badge(ticket.status),
+            ticketActions(ticket, true)
+          ];
+        })
+      )}
+      ${pager}
+      <p>
+        <b>Total del período: ${money(periodTotal)}</b>
+        <small>
+          · ${paid.length} pagados · Por cobrar: ${money(pendingTotal)}
+        </small>
+      </p>
+    </section>
+  `;
+}
+
+function incomeSummaryBlock() {
+  const [from, to] = billingRange();
+  const inRange = visibleTickets().filter(
+    ticket => ticket.date >= from && ticket.date <= to
+  );
+  const paid = inRange
+    .filter(ticket => ticket.status === 'Pagado')
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const pending = inRange.filter(ticket => ticket.status === 'Pendiente');
+  const total = round2(
+    paid.reduce((sum, ticket) => sum + Number(ticket.total || 0), 0)
+  );
+  const pendingTotal = round2(
+    pending.reduce((sum, ticket) => sum + Number(ticket.total || 0), 0)
+  );
+  const avg = paid.length ? round2(total / paid.length) : 0;
+
+  let detail = '';
+
+  if (!paid.length && !pending.length) {
+    detail = `
+      <div class="empty">
+        No hay ingresos en el período ${pretty(from)} – ${pretty(to)}.
+        Probá con otro rango de fechas.
+      </div>
+    `;
+  } else {
+    const byMethod = {};
+    const byVet = {};
+    const byService = {};
+    let servicesTotal = 0;
+    let productsTotal = 0;
+    let customTotal = 0;
+
+    paid.forEach(ticket => {
+      byMethod[ticket.paymentMethod] =
+        (byMethod[ticket.paymentMethod] || 0) + Number(ticket.total || 0);
+
+      const vetName = ticket.vetId
+        ? label('vets', ticket.vetId)
+        : 'Sin asignar';
+
+      byVet[vetName] = (byVet[vetName] || 0) + Number(ticket.total || 0);
+
+      ticket.items.forEach(item => {
+        const line = Number(item.qty || 0) * Number(item.unitPrice || 0);
+
+        if (item.type === 'service') servicesTotal += line;
+        if (item.type === 'product') productsTotal += line;
+        if (item.type === 'custom') customTotal += line;
+
+        if (item.type === 'service') {
+          byService[item.name] = byService[item.name] || { qty: 0, total: 0 };
+          byService[item.name].qty += Number(item.qty || 0);
+          byService[item.name].total += line;
+        }
+      });
+    });
+
+    const methodRows = Object.entries(byMethod)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, value]) => [
+        esc(name),
+        money(value),
+        propBar(total ? (value / total) * 100 : 0)
+      ]);
+    const itemsTotal = servicesTotal + productsTotal + customTotal;
+    const kindRows = [
+      ['Servicios', money(round2(servicesTotal)), propBar(itemsTotal ? (servicesTotal / itemsTotal) * 100 : 0)],
+      ['Productos', money(round2(productsTotal)), propBar(itemsTotal ? (productsTotal / itemsTotal) * 100 : 0)],
+      ['Ítems libres', money(round2(customTotal)), propBar(itemsTotal ? (customTotal / itemsTotal) * 100 : 0)]
+    ];
+    const vetRows = Object.entries(byVet)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, value]) => [
+        esc(name),
+        money(value),
+        propBar(total ? (value / total) * 100 : 0)
+      ]);
+    const topRows = Object.entries(byService)
+      .sort((a, b) => b[1].qty - a[1].qty)
+      .slice(0, 5)
+      .map(([name, info]) => [
+        esc(name),
+        esc(info.qty) + ' vendidos',
+        money(round2(info.total))
+      ]);
+
+    detail = `
+      <div class="income-grid">
+        <section class="card">
+          <h2>Por medio de pago</h2>
+          ${table(['Medio', 'Total', 'Proporción'], methodRows)}
+        </section>
+        <section class="card">
+          <h2>Servicios vs. productos</h2>
+          ${table(['Rubro', 'Total', 'Proporción'], kindRows)}
+        </section>
+        <section class="card">
+          <h2>Por profesional</h2>
+          ${table(['Profesional', 'Total', 'Proporción'], vetRows)}
+        </section>
+        <section class="card">
+          <h2>Top servicios</h2>
+          ${table(['Servicio', 'Cantidad', 'Total'], topRows)}
+        </section>
+      </div>
+      <section class="card">
+        <h2>Ingresos por día</h2>
+        ${billingChart(paid, from, to)}
+      </section>
+    `;
+  }
+
+  return `
+    <h2>Resumen del período</h2>
+
+    <section class="card">
+      <div class="toolbar">
+        ${button('Exportar CSV', 'billing-export')}
+      </div>
+      <p class="muted">
+        Período: ${pretty(from)} – ${pretty(to)}.
+        ${paid.length} tickets pagados por ${money(total)}.
+        Solo se cuentan tickets Pagado. Los Anulado se excluyen.
+      </p>
+    </section>
+
+    ${detail}
+  `;
+}
+
+function billingChart(paid, from, to) {
+  const days = [];
+  let cursor = from;
+  let guard = 0;
+
+  while (cursor <= to && guard < 93) {
+    days.push(cursor);
+    cursor = addDays(cursor, 1);
+    guard++;
+  }
+
+  const totals = Object.fromEntries(days.map(day => [day, 0]));
+
+  paid.forEach(ticket => {
+    if (totals[ticket.date] !== undefined) {
+      totals[ticket.date] += Number(ticket.total || 0);
+    }
+  });
+
+  const max = Math.max(1, ...Object.values(totals));
+  const width = 600;
+  const height = 220;
+  const pad = 30;
+  const gap = 6;
+  const barWidth = Math.max(
+    4,
+    (width - pad * 2) / Math.max(1, days.length) - gap
+  );
+
+  return `
+    <div class="chart-wrap">
+      <svg
+        viewBox="0 0 ${width} ${height}"
+        role="img"
+        aria-label="Gráfico de ingresos por día entre ${esc(from)} y ${esc(to)}"
+        preserveAspectRatio="xMidYMid meet"
+      >
+        ${days.map((day, index) => {
+          const value = totals[day];
+          const barHeight = Math.max(
+            value > 0 ? 4 : 0,
+            ((height - pad * 2) * value) / max
+          );
+          const x = pad + index * (barWidth + gap);
+          const y = height - pad - barHeight;
+
+          return `
+            <rect
+              x="${x.toFixed(1)}"
+              y="${y.toFixed(1)}"
+              width="${barWidth.toFixed(1)}"
+              height="${barHeight.toFixed(1)}"
+              rx="3"
+              fill="var(--primary)"
+            >
+              <title>${pretty(day)}: ${money(value)}</title>
+            </rect>
+          `;
+        }).join('')}
+        <line
+          x1="${pad}"
+          y1="${height - pad}"
+          x2="${width - pad}"
+          y2="${height - pad}"
+          stroke="currentColor"
+          stroke-opacity="0.3"
+        />
+        <text x="${pad}" y="${height - 8}" font-size="10" fill="currentColor">
+          ${pretty(days[0] || from)}
+        </text>
+        <text
+          x="${width - pad}"
+          y="${height - 8}"
+          font-size="10"
+          fill="currentColor"
+          text-anchor="end"
+        >
+          ${pretty(days[days.length - 1] || to)}
+        </text>
+      </svg>
+    </div>
+  `;
+}
+
+function billingExport() {
+  if (user.role !== 'admin') {
+    return toast('No tenés permisos para exportar.');
+  }
+
+  const [from, to] = billingRange();
+  const rows = visibleTickets()
+    .filter(ticket => ticket.date >= from && ticket.date <= to)
+    .sort((a, b) =>
+      a.date.localeCompare(b.date) ||
+      String(a.number).localeCompare(String(b.number))
+    );
+
+  if (!rows.length) {
+    return toast('No hay tickets para exportar en el período.');
+  }
+
+  const cell = value =>
+    '"' + String(value ?? '').replace(/"/g, '""') + '"';
+  const lines = [
+    ['Numero', 'Fecha', 'Propietario', 'Mascota', 'Veterinario', 'Detalle', 'Subtotal', 'Descuento', 'Total', 'Medio de pago', 'Estado', 'Notas']
+      .map(cell).join(';'),
+    ...rows.map(ticket => [
+      ticket.number,
+      ticket.date,
+      ticket.ownerId ? label('owners', ticket.ownerId) : 'Cliente mostrador',
+      ticket.petId ? label('pets', ticket.petId) : '',
+      ticket.vetId ? label('vets', ticket.vetId) : '',
+      ticket.items.map(
+        item => item.qty + 'x ' + item.name + ' ($' + item.unitPrice + ')'
+      ).join(' | '),
+      ticket.subtotal,
+      ticket.discount,
+      ticket.total,
+      ticket.paymentMethod,
+      ticket.status,
+      ticket.notes || ''
+    ].map(cell).join(';'))
+  ];
+
+  const blob = new Blob(['\ufeff' + lines.join('\r\n')], {
+    type: 'text/csv;charset=utf-8'
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+
+  link.href = url;
+  link.download = 'ingresos_' + from + '_' + to + '.csv';
+  link.click();
+
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function ownerTicketsHTML(ownerId) {
+  const rows = (db.tickets || [])
+    .filter(ticket =>
+      ticket.ownerId === ownerId && canSeeTicket(ticket)
+    )
+    .sort((a, b) =>
+      b.date.localeCompare(a.date) ||
+      String(b.createdAt).localeCompare(String(a.createdAt))
+    );
+
+  if (!rows.length) return '';
+
+  return `
+    <h2>Mis comprobantes</h2>
+    <section class="card">
+      ${table(
+        ['N°', 'Fecha', 'Mascota', 'Total', 'Estado', ''],
+        rows.map(ticket => [
+          esc(ticket.number),
+          pretty(ticket.date),
+          esc(ticket.petId ? label('pets', ticket.petId) : '—'),
+          money(ticket.total),
+          badge(ticket.status),
+          button('Ver', 'ticket-view', ticket.id, 'small') + ' ' +
+          button('Imprimir', 'ticket-print', ticket.id, 'small')
+        ])
+      )}
+    </section>
+  `;
 }
 
 // EVENTOS GENERALES
@@ -4645,6 +6665,10 @@ document.addEventListener('submit', async event => {
 });
 
 document.addEventListener('input', event => {
+  if (event.target.closest('form[data-form=ticket]')) {
+    ticketRecalc();
+  }
+
   if (event.target.id === 'list-search') {
     query = event.target.value;
     page = 1;
@@ -4728,6 +6752,83 @@ document.addEventListener('change', event => {
   if (element.id === 'agenda-vet') {
     agendaVet = element.value;
     renderContent();
+  }
+
+  if (element.id === 'billing-period') {
+    billingPeriod = element.value;
+
+    if (billingPeriod === 'custom') {
+      billingFrom = billingFrom && billingFrom !== today()
+        ? billingFrom
+        : addDays(today(), -30);
+      billingTo = today();
+    } else {
+      const [from, to] = billingRange();
+      billingFrom = from;
+      billingTo = to;
+    }
+
+    page = 1;
+    renderContent();
+  }
+
+  if (element.id === 'billing-from') {
+    billingFrom = element.value || today();
+    renderContent();
+  }
+
+  if (element.id === 'billing-to') {
+    billingTo = element.value || today();
+    renderContent();
+  }
+
+  const ticketFormEl = element.closest('form[data-form=ticket]');
+
+  if (ticketFormEl) {
+    const row = element.closest('.ticket-row');
+
+    if (row && element.classList.contains('ticket-type')) {
+      ticketUpdateRow(row);
+      ticketRecalc();
+    }
+
+    if (row && element.classList.contains('ticket-ref')) {
+      const type = row.querySelector('.ticket-type').value;
+      const price = row.querySelector('.ticket-price');
+
+      if (type === 'service') {
+        price.value = find('services', element.value)?.price ?? 0;
+      }
+
+      if (type === 'product') {
+        price.value = find('products', element.value)?.price ?? 0;
+      }
+
+      ticketRecalc();
+    }
+
+    if (element.name === 'ownerId') {
+      const petSelect = ticketFormEl.elements.petId;
+
+      if (petSelect) {
+        const current = petSelect.value;
+
+        petSelect.innerHTML =
+          '<option value="">Sin mascota</option>' +
+          ticketOwnerPets(element.value)
+            .map(pet => `
+              <option value="${esc(pet.id)}">
+                ${esc(pet.name)}
+              </option>
+            `).join('');
+
+        if (
+          [...petSelect.options].some(option => option.value === current)
+        ) {
+          petSelect.value = current;
+        }
+      }
+    }
   }
 
   if (element.closest('form[data-form=booking]')) {
